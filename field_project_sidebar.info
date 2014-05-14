@@ -1,0 +1,14 @@
+name = Field Project Second Sidebar Generator
+description = "Adds the righthand sidebar contents to the ."
+files[] = field_project_sidebar.module
+
+
+
+package = "EOL"
+version = "7.x-1.x
+core = "7.x"
+project = "field_project_sidebar"
+
+dependencies[] = menu
+dependencies[] = jquerymenu
+dependencies[] = book

@@ -1,0 +1,912 @@
+<?php
+/**
+ * @file
+ * Module file for field_project_sidebar.
+ */
+
+
+/**
+ * Implements hook_node_delete($node)
+ *
+ */
+
+
+
+// function hook_delete(&$node) {
+// 	dpm($node);
+// 	
+// 	if($node->type == 'sidebar_content') {
+// 		// if the node is not a top level book, redirect to the parent of thies book page
+// 		if ($node->book['bid'] != $node->nid) {
+// 		    $query = db_select('book', 'b', array('fetch' => PDO::FETCH_ASSOC));
+// 		    $query->join('menu_links', 'ml', 'ml.mlid = b.mlid');
+// 	
+// 			$query->fields('b', array('nid'));
+// 			$query->condition('b.mlid', $node->book['plid'], '=');
+// 			$parent_nids = $query->execute()->fetchAll();
+// 	
+// 			
+// 			$parent_nid = $parent_nids[0]->nid;
+// 			
+// 			drupal_goto("node/$parent_nid");
+// 		}
+// 	} 
+// 	// $_REQUEST['edit']['destination'] = [redirect path];
+// }
+
+
+
+/**
+ * Implements hook_form_alter(&$form, &$form_state, $form_id).
+ *
+ * 
+ */
+
+function field_project_sidebar_form_alter(&$form, &$form_state, $form_id) {
+	// global $node;
+	
+	// Add a cancel button to node forms
+	  if (strpos($form_id, 'node_form')) {
+
+		$nid = $form['nid']['#value'];
+	    $form['actions']['cancel'] = array(
+	          '#markup' => l(t('Cancel'), "node/$nid", array('attributes' => array('class' => 'fake-button')) ),
+	          '#weight' => '1000',
+	          );
+	  }	
+
+	
+    // Remove the option to alter the parent page, display in separate block, and separate block content  unless the node is a top level book
+	if ($form_id == "sidebar_content_node_form") {
+		if ($form['book']['nid']['#value'] != $form['book']['bid']['#default_value']) {
+			// unset($form['field_s_c_parent_page']);
+			unset($form['field_display_in_separate_block']);
+			unset($form['field_s_c_separate_block_content']);
+		}		
+	}
+	
+
+	
+	// limit the choices in the book pulldown to the top level books belonging to the current parent page
+	if ($form_id == "sidebar_content_node_form" || $form_id == "sidebar_link_node_form" || $form_id == "book_outline_form") {
+		$nid = $form['book']['nid']['#value'];
+		$bid = $form['book']['bid']['#default_value'];
+
+
+		$options = array();
+
+
+		// add the "create a new book" option
+		// (but only if this is s sub page, or a new page)
+		if ($nid == 'new') {  // for new content
+			// only if this is a new top level book page
+			if ($bid == 0) {
+				$options[$nid] = reset($form['book']['bid']['#options']);							
+			}
+		} else { // for editing of other content
+			if ($bid != $nid ) {   
+				// only if this is a sub page that the user mighte want to 
+				// make into ta to plevel book
+				$options[$nid] = reset($form['book']['bid']['#options']);			
+			}			
+		}
+		
+
+		// make sure the parent page can be found
+		if (isset($form['#node']->field_s_c_parent_page['und'][0]['target_id'])) {
+			$parent_nid = $form['#node']->field_s_c_parent_page['und'][0]['target_id'];
+		} else {
+			$url_array = drupal_parse_url($form['#action']);
+			
+			if(isset($url_array['query']['field_s_c_parent_page'])) {
+				$parent_nid = $url_array['query']['field_s_c_parent_page'];
+			}
+		}
+
+		if (isset($parent_nid) ) {
+			// $parent_nid = $form['field_s_c_parent_page']['und']['0']['target_id']['#entity']->field_s_c_parent_page['und'][0]['target_id'];
+
+			foreach (_get_top_level_books_of_parent_node($parent_nid) AS $book_node) {
+				$options[$book_node['nid']] = $book_node['title'];	
+			}
+
+			// set the provided options to be limited to the list just generated
+			$form['book']['bid']['#options'] = $options;
+			$form['book']['bid']['#validated'] = TRUE;			
+		}
+
+	}
+
+}
+
+
+
+
+function _get_top_level_books_of_parent_node ($parent_nid) {
+
+	// get nodes that are marked to be displayed in their own sidebar block
+    $query = db_select('field_data_field_s_c_parent_page', 'pn', array('fetch' => PDO::FETCH_ASSOC));
+
+    $query->join('node', 'n', 'n.nid = pn.entity_id'); // join node table
+    $query->leftJoin('book', 'b', 'b.nid = pn.entity_id'); // must be a book
+
+	$query->condition('pn.field_s_c_parent_page_target_id', $parent_nid, '='); 
+	$query->where('n.nid = b.bid'); // only top level books
+
+
+	$query->addField('n', 'nid', 'nid');
+	$query->addField('n', 'title', 'title');
+
+    $query->orderBy('n.title');
+    $query->addTag('node_access');
+
+    $nodes = $query->execute()->fetchAll();
+
+	return($nodes);
+}
+
+/**
+ * Implements hook_node_update($node).
+ *
+ * Remove the option to alter the parent page, display in separate block, and separate block content  unless the node is a top level book
+ */
+
+function field_project_sidebar_node_update($node) {
+
+	if (isset($node->field_s_c_parent_page)) {
+
+		// Only update if the top level book was the one edited
+		if ($node->book['bid'] == $node->nid) {
+			
+			$field_language = field_language('node', $node, 'field_s_c_parent_page'); 
+
+			$bid = $node->book['bid'];
+
+			$new_parent_page_target_id = $node->field_s_c_parent_page[$field_language]['0']['target_id'];
+			$old_parent_page_target_id = $node->original->field_s_c_parent_page[$field_language]['0']['target_id'];
+
+			if ($new_parent_page_target_id != $old_parent_page_target_id) {
+				// get all the nodes that are in this book
+				// except for the node being edited
+				$query = Database::getConnection()
+					->select('book', 'b')
+					->fields('b', array('nid', 'bid'));
+				$query->condition('b.bid', $bid, '=');
+				$query->condition('b.nid', $bid, '!='); 
+
+				$child_nids = $query->execute()->fetchAll();
+
+				// set the parent page for each of the children
+				foreach ($child_nids as $child_nid) {	
+					$child_node = node_load($child_nid->nid);
+
+					$child_node->field_s_c_parent_page[$field_language]['0']['target_id'] = $new_parent_page_target_id;
+					node_save($child_node);
+				}	
+			}			
+		}
+	}
+}
+
+
+/**
+ * Implements hook_menu().
+ *
+ * Provides a default page to explain what this module does.
+ */
+
+// function field_project_sidebar_preprocess_block(&$variables) {
+// 
+// 	if (isset($variables['block']) && isset($variables['block']->highlight_block) ) {
+// 		if ($variables['block']->highlight_block == TRUE)   {
+// 			$variables['classes_array'][] = drupal_html_class('sidebar-highlight');
+// 		}
+// 		
+// 	} 
+// }
+
+
+function field_project_sidebar_page_alter(&$page) {
+
+	// get the nid of the top level section node
+	$nid = arg(1);
+	$node = node_load($nid);
+
+
+	// get nodes that are marked to be displayed in their own sidebar block
+
+
+	// change the sidebar
+	$sidebar_parent_node_types = array("book", "field_project", "organization_facility", "observing_facility", "software_package", "instrument" );
+
+	if (preg_match('/\/edit\W*|\/order|user\//', current_path())) {
+		// don't show sidebar on edit, order or user pages
+	} else if ($node && in_array($node->type, $sidebar_parent_node_types)) {		
+		$page = get_field_project_sidebar($node, $page);	
+
+		$parent_node = $node;
+
+		$page['parent_page_links']['system_main']['nodes'][$node->nid]['calendar_link'] = _get_custom_links_render_array($parent_node) ;
+		
+	// if the current node is a sidebar, get it's parent and display the page
+	} else if ($node && ($node->type == 'sidebar_content' || $node->type == 'sidebar_link') ) {
+		$field_language = field_language('node', $node, 'field_s_c_parent_page'); 
+		$parent_nid = $node->field_s_c_parent_page[$field_language][0]['target_id'];
+		
+		$parent_node = node_load($parent_nid);
+		$page = get_field_project_sidebar($parent_node, $page);
+
+		$page['parent_page_links']['system_main']['nodes'][$node->nid]['calendar_link'] = _get_custom_links_render_array($parent_node) ;
+
+	// for event pages
+	} else if ($node && ($node->type == 'event') ) {
+
+		$field_language = field_language('node', $node, 'field_event_calendar'); 
+
+		if (isset($node->field_event_calendar[$field_language][0]['target_id'])) {
+			$parent_nid = $node->field_event_calendar[$field_language][0]['target_id'];
+
+			$parent_node = node_load($parent_nid);
+			$page = get_field_project_sidebar($parent_node, $page);
+
+			$page['parent_page_links']['system_main']['nodes'][$node->nid]['calendar_link'] = _get_custom_links_render_array($parent_node) ;
+			
+		}
+	}
+
+}
+
+function _get_custom_links_render_array ($parent_node) {
+
+	$calendar_link_html = '';
+	$calendar_link_html .=  "<div id=\"parent-page-links\">";	
+	// $calendar_link_html .=  "<div id=\"custom-link-icons\">";	
+
+
+	// see if there are any events associated with this node
+	$sql_count_result = db_query('SELECT ec.entity_id FROM {field_data_field_event_calendar} ec WHERE ec.field_event_calendar_target_id = :nid', array(':nid' => $parent_node->nid));
+
+	// add a calendar icon and link to the main page contents
+	
+	if ($sql_count_result->rowCount() > 0 && isset($parent_node->type) && in_array($parent_node->type, array('field_project', 'book', 'observing_facility'))) {
+
+		$calendar_icon_html = "<img src=\"/sites/all/themes/eol_external/images/calendar_icon_20x20.png\" alt=\"Calendar\" title=\"" . $parent_node->title . " Calendar\">";
+		$calendar_link = l("$calendar_icon_html", 'node/'. $parent_node->nid . "/calendar/month", array('html' => TRUE));			
+
+		$calendar_link_html .=  "<div id=\"calendar-link\">$calendar_link</div>";	
+	}	
+
+	// add a back link for field projects
+	if ($parent_node->type == 'field_project') {
+		$back_icon_html = "<img src=\"/sites/all/themes/eol_external/images/back_to_section_icon_20x20.png\" alt=\"Back\" title=\"Back to " . $parent_node->title . "\">";
+		$back_link = l("$back_icon_html", 'node/'. $parent_node->nid , array('html' => TRUE));			
+
+		$calendar_link_html .=  "<div id=\"calendar-link\">$back_link</div>";					
+	}
+
+	// $calendar_link_html .=  "</div>";	
+	$calendar_link_html .=  "</div>";	
+
+
+	$new_field_contents = array();
+	$new_field_contents['#theme'] = 'field';
+	// $new_field_contents['#access'] = TRUE;
+
+	$new_field_contents['#label_display'] = 'hidden';
+	$new_field_contents['#field_name'] = 'fake_field_calendar_link';
+	$new_field_contents['#field_type'] = 'fake_field';
+	$new_field_contents['#bundle'] = $parent_node->type;
+
+	// $new_field_contents['#title'] = 'Calendar Link';
+	$new_field_contents['#weight'] = '-20';
+	$new_field_contents[0]['#markup'] = $calendar_link_html;
+	// $new_field_contents['#items'][0]['value'] = $calendar_link;
+	$new_field_contents['#items'][0]['safe_value'] = $calendar_link_html;
+
+	// $page['content']['system_main']['nodes'][$parent_node->nid]['calendar_link'] = $new_field_contents ;
+	
+	return($new_field_contents);
+}
+
+
+function get_field_project_sidebar ($field_project_node, $page) {
+	// get the other sidebar content
+	$top_level_plids = array(0);
+	
+	$node = menu_get_object();
+
+	$top_level_nodes = get_top_level_nodes($top_level_plids, $field_project_node->nid);	
+
+	$field_language = field_language('node', $field_project_node, 'field_sidebar_navigation_title'); 
+
+	// ovverride the sidebar title
+	if (isset($field_project_node->field_sidebar_navigation_title[$field_language][0]['safe_value']) && $field_project_node->field_sidebar_navigation_title[$field_language][0]['safe_value']) {
+		$title = $field_project_node->field_sidebar_navigation_title[$field_language][0]['safe_value'];
+	} else {
+		$title = "$field_project_node->title Pages";			
+	}
+
+
+	$tree_items = array();
+	$tree_items = recursive_menu_tree_builder($tree_items, $top_level_nodes, $field_project_node->nid);
+
+	$j_trail = jquerymenu_trail_creator();		
+
+
+	$contents = theme('jquerymenu_menu', array('tree' => $tree_items, 'trail' => $j_trail));
+
+	$block_name = 'field_project_sidebar_other_content';
+	$weight = 0;
+
+	// if there was content add it to the sidebar
+	if($contents) {
+		$block = new stdClass;			
+		$block->weight = $weight;
+		
+		$block->subject = $title;
+		$block->region = 'sidebar_second';
+		$block->module = 'field_project_sidebar';
+		$block->delta = $block_name;
+
+		$block_array = array();
+		$block_array['#markup'] = $contents;
+		$block_array['#block'] = $block;
+		$block_array['#weight'] = $weight;
+		$block_array['#theme_wrappers'] = array('0' => 'block');
+
+		if (isset($block_array) && sizeof($block_array) > 0 ) {
+			$page['sidebar_second'][$block_name] = $block_array;
+			$page['sidebar_second']['#sorted'] = FALSE;		
+		}
+	}
+
+	// get the separate blocks
+
+		$sidebar_nids = get_sidebar_nodes($field_project_node->nid);
+
+		foreach ($sidebar_nids AS $sidebar_nid) {
+			$sidebar_node = node_load($sidebar_nid['entity_id']);
+	
+			$this_book_node = node_load ($sidebar_node->book['bid']);
+			$this_book_nid = $sidebar_node->book['bid'];
+	
+			$this_book_level_plids = array(0);
+			$top_level_nodes = get_single_book_top_level_nodes($this_book_level_plids, $field_project_node->nid, $this_book_nid);		
+			
+			$title = $this_book_node->title;
+
+			$tree_items = array();
+			$tree_items = recursive_menu_tree_builder($tree_items, $top_level_nodes, $field_project_node->nid);
+		
+			// in a separate sidebar block, display the menu tree by default
+			$display_sidebar_node_menu_tree = TRUE;
+	
+			// determine if the sidebar node has content in the field_s_c_separate_block_content field
+			if ($sidebar_node->field_s_c_separate_block_content) {
+				$field_language = field_language('node', $sidebar_node, 'field_s_c_separate_block_content'); 
+
+				$html_content = $sidebar_node->field_s_c_separate_block_content[$field_language][0]['safe_value'];
+
+				if ($html_content) {
+					$display_sidebar_node_menu_tree = FALSE;
+				}
+			}
+
+			// set the subject
+			// only make it a link if the user may edit the sidebar
+			global $user;
+
+			if ( array_intersect(array('editor', 'administrator'), array_values($user->roles)) ) {
+				$subject = l($sidebar_node->title, drupal_get_path_alias("node/".$sidebar_node->nid));
+			} else {
+				$subject = $sidebar_node->title;
+			}
+
+			if ($display_sidebar_node_menu_tree == TRUE && isset($tree_items[0]['below']) ) {
+				// remove the top level in the array, as this is duplicated in the title page link
+
+				$tree_items = $tree_items[0]['below'];
+		
+
+				$j_trail = jquerymenu_trail_creator();		
+
+				$contents = theme('jquerymenu_menu', array('tree' => $tree_items, 'trail' => $j_trail));				
+
+
+
+				$block_name = 'field_project_sidebar_' . $sidebar_nid['entity_id'];
+
+				$block = new stdClass;			
+				$block->weight = $sidebar_node->weight_weight;
+
+				$block->subject = $subject;
+				$block->region = 'sidebar_second';
+				$block->module = 'field_project_sidebar';
+				$block->delta = $block_name;
+
+				$block_array = array();
+				$block_array['#markup'] = $contents;
+				$block_array['#block'] = $block;
+				$block_array['#weight'] = $sidebar_node->weight_weight;
+				$block_array['#theme_wrappers'] = array('0' => 'block');
+
+				if (isset($block_array) && sizeof($block_array) > 0 ) {
+					$page['sidebar_second'][$block_name] = $block_array;	
+					$page['sidebar_second']['#sorted'] = FALSE;	
+				}			
+
+
+		
+			} else {
+				$block_name = 'field_project_sidebar_' . $sidebar_nid['entity_id'];
+
+				$block = new stdClass;			
+				$block->weight = $sidebar_node->weight_weight;
+				$block->subject = $block->subject = $subject;
+				$block->region = 'sidebar_second';
+				$block->module = 'field_project_sidebar';
+				$block->delta = $block_name;
+
+				$block_array = array();
+
+				$field_language = field_language('node', $sidebar_node, 'field_s_c_separate_block_content'); 
+
+				if (isset($sidebar_node->field_s_c_separate_block_content[$field_language])) {
+					$block_array['#markup'] = $sidebar_node->field_s_c_separate_block_content[$field_language]['0']['safe_value'];			
+				}
+				$block_array['#block'] = $block;
+				$block_array['#weight'] = $sidebar_node->weight_weight;
+				$block_array['#theme_wrappers'] = array('0' => 'block');
+
+				if (isset($block_array) && sizeof($block_array) > 0 ) {
+					$page['sidebar_second'][$block_name] = $block_array;
+					$page['sidebar_second']['#sorted'] = FALSE;		
+				}				
+			}
+
+		}
+	
+	return($page);
+}
+
+
+function recursive_menu_tree_builder($tree, $book_nodes, $parent_nid) {
+	$next_level_plids = array();
+
+	// loop through all the books in this level, placing them in the tree as we go
+	foreach ($book_nodes as $book_node) {
+
+		$tree = place_book_node_in_tree($tree, $book_node);
+		// add the mlid to the search list for child nodes
+		array_push($next_level_plids, $book_node['mlid']);
+	}
+
+	
+	// make sure the list of plids has unique entries
+	$next_level_plids = array_unique($next_level_plids);
+
+	// get the books at the next deepest level
+	if (sizeof($next_level_plids) > 0 && $next_level_plids[0] != 0) {
+
+		$child_nodes = get_top_level_nodes($next_level_plids, $parent_nid);
+
+		if(sizeof($child_nodes) >0 ) {
+			// assign the next deepest level to the tree, and search for their respective children
+			$tree = recursive_menu_tree_builder($tree, $child_nodes, $parent_nid);			
+		}
+	}
+
+	return $tree;
+}
+
+
+function place_book_node_in_tree($tree_items, $book_node) {
+	global $user;
+
+	// define the basic information to be placed into the tree
+	$new_tree_item = array();
+
+	$new_tree_item['link']['hidden'] = '0';
+
+  	$path = base_path() . drupal_get_path('module', 'jquerymenu');
+  	$editimage = '<img src="' . $path . '/images/edit.png" alt="edit" />';
+
+	if ($book_node['type'] == 'sidebar_link') {
+			$book_node_object = new stdClass;	
+			$book_node_object->nid = $book_node['nid'];
+			$book_node_object->type = $book_node['type'];
+			$book_node_object->status = $book_node['status'];
+
+		// if the user had permission to update the ndoe, present a link to them so they can get to the edit page
+		if (isset($user) &&  isset($book_node['nid']) &&  node_access('update', $book_node_object, $user) ) {
+
+			$edit_path = 'node/'. $book_node['nid'] . '/edit';		
+
+			$title_with_link = $book_node['title'] . ' ';
+			$title_with_link .= l($editimage, $edit_path, array('html' => TRUE, 'attributes' => array('class' => 'edit-sidebar-link')));
+
+
+
+			$new_tree_item['link']['title'] =  $title_with_link;
+			$new_tree_item['link']['href'] = $book_node['field_sidebar_link_url'];
+
+			$new_tree_item['link']['options']['html'] = TRUE;
+
+			$new_tree_item['link']['options']['attributes']['title'] = $title_with_link;	
+		} else {
+			$new_tree_item['link']['title'] =  $book_node['title'];
+			$new_tree_item['link']['href'] = $book_node['field_sidebar_link_url'];
+
+			$new_tree_item['link']['options']['attributes']['title'] = $book_node['title'];				
+		}
+		
+
+	} else {
+		$new_tree_item['link']['title'] = $book_node['title'] ;
+		$new_tree_item['link']['href'] = 'node/'. $book_node['nid'];		
+
+		$new_tree_item['link']['options']['attributes']['title'] = $book_node['title'];		
+
+	}
+
+	$new_tree_item['link']['options']['html'] = TRUE;
+
+	$new_tree_item['mlid'] = $book_node['mlid'];		
+	$new_tree_item['plid'] = $book_node['plid'];		
+
+	// these are default, and are overwritten if a child element is found
+	$new_tree_item['link']['has_children'] = '0';  
+	$new_tree_item['below'] = FALSE;
+
+
+	// if the plid of the new item is 0 then this is a top level book
+	if ($book_node['plid'] == 0 ) {
+		array_push($tree_items, $new_tree_item);
+
+	// otherwise, sift through the tree and find the childs parent
+	} else {
+		$tree_items = place_child_item_in_tree($tree_items, $new_tree_item);
+	}
+	
+	return($tree_items);
+}
+
+
+function place_child_item_in_tree ($tree_items, $new_tree_item) {
+
+	$match_found = FALSE;
+	 
+	// go through all item in this level of the tree looking for a match
+	foreach ($tree_items AS $index => $tree_item) {
+
+		if ($tree_item['mlid'] == $new_tree_item['plid']) {
+			// found it!
+			
+			if ($tree_item['below'] == FALSE) {
+				$tree_items[$index]['link']['has_children'] = TRUE;
+				$tree_items[$index]['below'] = array();
+			} 
+			
+			$match_found = TRUE;
+
+			array_push($tree_items[$index]['below'], $new_tree_item);
+
+			// don't need to keep searching
+			return($tree_items);
+		}
+	}
+	
+	// the item wasn't in this level of the tree; look deeper
+	if ($match_found == FALSE) {
+		foreach ($tree_items AS $index => $tree_item) {
+
+			if ($tree_item['link']['has_children'] == TRUE) {
+				$returned_tree = place_child_item_in_tree($tree_item['below'], $new_tree_item);
+				if ($tree_items[$index]['below'] == $returned_tree) {
+				} else {
+					$tree_items[$index]['below']  = $returned_tree;
+
+					// don't need to keep searching
+					return($tree_items);
+				}
+			}
+		}
+	}	
+	
+	return($tree_items);
+}
+
+
+function get_top_level_nodes ($plids, $nid) {
+
+	// get nodes that are marked to be displayed in their own sidebar block
+    $query = db_select('field_data_field_s_c_parent_page', 'pn', array('fetch' => PDO::FETCH_ASSOC));
+
+    $query->join('node', 'n', 'n.nid = pn.entity_id'); // join node table
+
+    $query->leftJoin('field_data_field_display_in_separate_block', 'sb', 'sb.entity_id = pn.entity_id');
+
+    $query->leftJoin('field_data_field_sidebar_link', 'sl', 'sl.entity_id = pn.entity_id');
+
+    $query->leftJoin('book', 'b', 'b.nid = pn.entity_id'); // must be a book
+    $query->leftJoin('menu_links', 'ml', 'b.mlid = ml.mlid'); // must be a top level book
+
+	$query->addField('n', 'nid', 'nid');
+
+	// get top level books, or nods that are not in a book
+	if (sizeof($plids) == 1 && $plids[0] == 0) {
+		$query->condition(db_or()->condition('ml.plid', $plids, 'IN')->condition('ml.plid', NULL, 'IS'));
+	} else {
+	    $query->condition('ml.plid', $plids, 'IN');				
+	}
+
+
+	$query->condition('pn.field_s_c_parent_page_target_id', $nid, '=');
+	// $query->condition('sb.field_display_in_separate_block_value', 0, '=');
+	$query->where('(sb.field_display_in_separate_block_value = 0  OR sb.field_display_in_separate_block_value IS NULL )');
+
+	$query->addField('pn', 'entity_id', 'entity_id');
+
+	$query->addField('n', 'nid', 'nid');
+
+	$query->addField('n', 'type', 'type');
+	$query->addField('n', 'status', 'status');
+	
+	$query->addField('sl', 'field_sidebar_link_url', 'field_sidebar_link_url');
+
+
+	$query->addField('b', 'mlid', 'mlid');
+	$query->addField('ml', 'plid', 'plid');
+	$query->addField('n', 'title', 'title');
+
+    $query->orderBy('ml.weight');
+    $query->orderBy('ml.link_title');
+    $query->addTag('node_access');
+
+    $nodes = $query->execute()->fetchAll();	
+
+	return($nodes);	
+}
+
+
+function get_single_book_top_level_nodes ($plids, $parent_page_nid, $top_level_book_nid) {	
+
+	// get nodes that are marked to be displayed in their own sidebar block
+    $query = db_select('field_data_field_s_c_parent_page', 'pn', array('fetch' => PDO::FETCH_ASSOC));
+
+    $query->join('node', 'n', 'n.nid = pn.entity_id'); // join node table
+
+    $query->leftJoin('field_data_field_display_in_separate_block', 'sb', 'sb.entity_id = pn.entity_id');
+
+    $query->leftJoin('field_data_field_sidebar_link', 'sl', 'sl.entity_id = pn.entity_id');
+
+    $query->leftJoin('book', 'b', 'b.nid = pn.entity_id'); // must be a book
+    $query->leftJoin('menu_links', 'ml', 'b.mlid = ml.mlid'); // must be a top level book
+
+	// get top level books, or nods that are not in a book
+	if (sizeof($plids) == 1 && $plids[0] == 0) {
+		$query->condition(db_or()->condition('ml.plid', $plids, 'IN')->condition('ml.plid', NULL, 'IS'));
+	} else {
+	    $query->condition('ml.plid', $plids, 'IN');				
+	}
+
+
+	$query->condition('pn.field_s_c_parent_page_target_id', $parent_page_nid, '='); // parent nid
+	$query->condition('n.nid', $top_level_book_nid, '=');
+
+	// $query->condition('sb.field_display_in_separate_block_value', 0, '=');
+
+	$query->addField('pn', 'entity_id', 'entity_id');
+
+	$query->addField('n', 'nid', 'nid');
+
+	$query->addField('n', 'type', 'type');
+	$query->addField('n', 'status', 'status');
+
+	$query->addField('sl', 'field_sidebar_link_url', 'field_sidebar_link_url');	
+	
+	$query->addField('b', 'mlid', 'mlid');
+	$query->addField('ml', 'plid', 'plid');
+	$query->addField('n', 'title', 'title');
+
+    $query->orderBy('ml.weight');
+    $query->orderBy('ml.link_title');
+    $query->addTag('node_access');
+
+    $nodes = $query->execute()->fetchAll();	
+
+	return($nodes);	
+}
+
+
+function get_sidebar_nodes ($nid) {
+
+	// get nodes that are marked to be displayed in their own sidebar block
+    $query = db_select('field_data_field_s_c_parent_page', 'pn', array('fetch' => PDO::FETCH_ASSOC));
+    $query->join('field_data_field_display_in_separate_block', 'sb', 'sb.entity_id = pn.entity_id');
+
+    $query->join('node', 'n', 'sb.entity_id = n.nid'); // this is necessary for the node_access tag to work
+
+	$query->condition('pn.field_s_c_parent_page_target_id', $nid, '=');
+	$query->condition('sb.field_display_in_separate_block_value', 1, '=');
+
+	$query->addField('pn', 'entity_id', 'entity_id');
+
+	$query->addField('sb', 'field_display_in_separate_block_value', 'field_display_in_separate_block_value');
+    $query->addTag('node_access');
+
+    $sidebar_nodes = $query->execute()->fetchAll();	
+
+		
+	return($sidebar_nodes);
+}
+
+
+
+
+
+
+/**
+ * Implements hook_block_info().
+ *
+ * This hook declares what blocks are provided by the module.
+ */
+function field_project_sidebar_block_info() {
+
+  $blocks['field_project_websites'] = array(
+    'info' => t('Field Project Project Website Block'),
+    'status' => TRUE,
+    'region' => 'footer_secondcolumn',  // Not usually provided.
+  );
+
+
+  $blocks['field_project_custom_block_1'] = array(
+    'info' => t('Field Project Custom Block #1'),
+    'status' => TRUE,
+    'region' => 'footer_secondcolumn',  // Not usually provided.
+  );
+
+  $blocks['field_project_custom_block_2'] = array(
+    'info' => t('Field Project Custom Block #2'),
+    'status' => TRUE,
+    'region' => 'footer_thirdcolumn',  // Not usually provided.
+  );
+
+  $blocks['field_project_contact_info'] = array(
+    'info' => t('Field Project Contact Information Block'),
+    'status' => TRUE,
+    'region' => 'footer_secondcolumn',  // Not usually provided.
+  );
+
+  return $blocks;
+}
+
+
+
+/**
+ * Implements hook_block_view().
+ *
+ * This hook generates the contents of the blocks themselves.
+ */
+function field_project_sidebar_block_view($delta = '') {
+  //The $delta parameter tells us which block is being requested.
+
+	//  get the node id of the current node
+	// global $node; // Can't use this, as anonymous users for some reason don't have the global variable set
+	
+	$nid = arg(1);
+	$node = node_load($nid);
+
+	if (isset($node->type)) {
+		if ($node->type == 'field_project') {
+			$field_project_node = $node;
+		}
+
+		if ($node->type == 'sidebar_content') {
+
+			$field_project_nid = $node->field_s_c_parent_page[$node->language][0]['target_id'];
+			$field_project_node = node_load($field_project_nid);
+		}
+		
+
+	}
+
+	// only for field project pages
+	if (isset($field_project_node) && $node && isset($field_project_node->type) && $field_project_node->type == 'field_project') { 
+
+	  switch ($delta) {
+		case 'field_project_websites':
+			$subject = 'Project Websites';
+			$content = _theme_links_from_field_array($field_project_node, 'field_f_p_websites');
+
+			$block = _get_field_project_custom_block_content($subject, $content);
+	  		return $block;
+	      break;
+
+	    case 'field_project_custom_block_1':
+			$subject = _get_field_safe_value($field_project_node, 'field_f_p_footer_block_header_1');
+			$content = _get_field_safe_value($field_project_node, 'field_f_p_footer_block_content_1');
+
+			$block = _get_field_project_custom_block_content($subject, $content);
+	  		return $block;
+	      break;
+	    case 'field_project_custom_block_2':
+			$subject = _get_field_safe_value($field_project_node, 'field_f_p_footer_block_header_2');
+			$content = _get_field_safe_value($field_project_node, 'field_f_p_footer_block_content_2');
+
+			$block = _get_field_project_custom_block_content($subject, $content);
+	  		return $block;
+	      break;
+		case 'field_project_contact_info':
+			$subject = 'Contact Information';
+			$content = _get_field_safe_value($field_project_node, 'field_f_p_contact_information');
+
+			$block = _get_field_project_custom_block_content($subject, $content);
+	  		return $block;
+	      break;
+	  }	
+	}
+	
+	return;
+}
+
+
+function _theme_links_from_field_array($node, $field_name) {
+	$items = field_get_items('node', $node, $field_name);
+
+	$html = '';
+
+	if ($items && sizeof($items) > 0) {
+		$html_array = array();
+		foreach($items AS $item) {
+			$output = field_view_value('node', $node, $field_name, $item, array());
+			$html_array[] = '<div class="field-item">' . drupal_render($output) . '</div>';
+		}
+
+		$html = '<div class="field-items">' . implode("\n", $html_array) . '</div>';
+		
+	}
+		
+	return($html);
+}
+
+
+function _get_field_project_custom_block_content($subject, $content) {
+	$block = array();
+	
+	if($subject) {
+		$block['subject'] = $subject;
+	}	
+
+	if($content) {
+		$block['content'] = $content;
+	}
+	
+	// If there is content don't cache the block
+	// If there's nothing, return nothing (FALSE)
+	if(sizeof($block) > 0 ) {
+		$block['cache'] = DRUPAL_NO_CACHE;					
+	} else {
+		$block = FALSE;
+	}
+	
+
+	return($block);
+}
+
+
+function _get_field_safe_value($node, $field_name) {
+	$safe_value = FALSE;
+	if(isset($node->$field_name) && $node->$field_name) {
+		$field_language = field_language('node', $node, $field_name); 
+
+		$field = $node->$field_name;
+		
+		if (isset($field[$field_language]['0']['safe_value'])  ) {	
+			$safe_value = t($field[$field_language]['0']['safe_value']);
+		}
+		
+	}
+	
+	return($safe_value);
+}
